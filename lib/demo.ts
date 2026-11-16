@@ -1,5 +1,5 @@
-export type Agent = { id:string; name:string; role:string; initials:string; color:string; status:string; rating:string; reviews:number; skills:string[]; completed:number; success:number; earned:string; nearAccountId:string };
-export type Bid = { id:string; title:string; category:string; agent:string; agentId:string; amount:number; eta:string; score:string; status:string; color:string; description?:string };
+export type Agent = { id:string; name:string; role:string; initials:string; color:string; status:string; rating:string; reviews:number; skills:string[]; completed:number; success:number; earned:string; nearAccountId:string; description?:string; availability?:'available'|'busy'|'offline'; isActive?:boolean; isMine?:boolean };
+export type Bid = { id:string; title:string; category:string; agent:string; agentId:string; amount:number; eta:string; score:string; status:string; color:string; description?:string; workerAccountId?:string|null; bidCount?:number; isMine?:boolean; selectedAgentId?:string|null; deadlineAt?:string|null; createdAt?:string };
 
 export const demoAgents: Agent[] = [
  {id:'kemi',name:'Kemi Researcher',role:'Research & market intelligence',initials:'KR',color:'green',status:'Idle',rating:'4.9',reviews:28,skills:['African markets','Research','Report writing'],completed:42,success:98,earned:'8.24',nearAccountId:''},

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Activity, ArrowDownLeft, ArrowUpRight, BadgeCheck, Bell, BriefcaseBusiness,
   Check, ChevronDown, CircleHelp, Clock3, Code2, Coins, FileText, Fingerprint,
@@ -9,6 +9,8 @@ import {
 } from 'lucide-react';
 import { demoAgents, demoBids, demoReport, type Agent, type Bid } from '@/lib/demo';
 import AccountControl from '@/components/account-control';
+import AgentDirectory from '@/components/agent-directory';
+import PersistentTaskWorkspace from '@/components/persistent-task-workspace';
 import { connectNearWallet, getEscrowContractId, isValidNearAccountId, nearExplorerUrl, readEscrow, signEscrowCall, toYoctoNear, verifyTestnetAccount, waitForEscrow, waitForTransaction, type EscrowCall, type EscrowView } from '@/lib/near/client';
 
 type View = 'overview' | 'marketplace' | 'workspace' | 'agents' | 'treasury';
@@ -23,6 +25,8 @@ const nav: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
 ];
 
 export default function Home() {
+  const persistentMode = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() && (process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim() || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()));
+  const emptyTask: Bid = { id: '', title: '', category: '', agent: '', agentId: '', amount: 0, eta: '', score: '', status: '', color: 'gold' };
   const [view, setView] = useState<View>('overview');
   const [walletOpen, setWalletOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -31,16 +35,18 @@ export default function Home() {
   const [query, setQuery] = useState('');
   const [toast, setToast] = useState('');
   const [approved, setApproved] = useState(false);
-  const [bids, setBids] = useState<Bid[]>(demoBids);
-  const [activeTask, setActiveTask] = useState<Bid>(demoBids[0]);
+  const [bids, setBids] = useState<Bid[]>(persistentMode ? [] : demoBids);
+  const [activeTask, setActiveTask] = useState<Bid>(persistentMode ? emptyTask : demoBids[0]);
   const [taskTitle, setTaskTitle] = useState('');
   const [taskBudget, setTaskBudget] = useState('');
   const [taskDescription, setTaskDescription] = useState('');
+  const [taskCapabilities, setTaskCapabilities] = useState('Research');
   const [taskDeadlineDays, setTaskDeadlineDays] = useState('7');
   const [taskSaving, setTaskSaving] = useState(false);
   const [createIdempotencyKey, setCreateIdempotencyKey] = useState<string>();
   const [workspaceLoadError, setWorkspaceLoadError] = useState('');
-  const [agents, setAgents] = useState<Agent[]>(demoAgents);
+  const [workspaceLoading, setWorkspaceLoading] = useState(persistentMode);
+  const [agents, setAgents] = useState<Agent[]>(persistentMode ? [] : demoAgents);
   const [workerAccountId, setWorkerAccountId] = useState(demoAgents[0].nearAccountId);
   const [workerVerified, setWorkerVerified] = useState(false);
   const [workerCheck, setWorkerCheck] = useState('');
@@ -49,14 +55,23 @@ export default function Home() {
   const [chainError, setChainError] = useState('');
   const [receipts, setReceipts] = useState<ChainReceipt[]>([]);
   const contractConfigured = Boolean(process.env.NEXT_PUBLIC_ESCROW_CONTRACT_ID?.trim());
-  const persistentMode = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() && (process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim() || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()));
+  const myActiveAgents = agents.filter((agent) => agent.isMine && agent.isActive).slice(0, 3);
 
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 3600); };
-  const shownAgents = useMemo(() => agents.filter((a) => `${a.name} ${a.role} ${a.skills.join(' ')}`.toLowerCase().includes(query.toLowerCase())), [agents, query]);
+  const updateActiveTask = useCallback((task: Bid) => {
+    setActiveTask(task);
+    setBids((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+  }, []);
+  const updateWorkerAccount = useCallback((value: string) => {
+    setWorkerAccountId(value);
+    setWorkerVerified(false);
+    setWorkerCheck('');
+  }, []);
 
   useEffect(() => {
     if (!persistentMode) return;
     let cancelled = false;
+    setWorkspaceLoading(true);
     void Promise.all([
       fetch('/api/tasks', { cache: 'no-store' }),
       fetch('/api/agents', { cache: 'no-store' }),
@@ -67,12 +82,12 @@ export default function Home() {
       if (!agentResponse.ok) throw new Error(typeof agentData.error === 'string' ? agentData.error : 'Agents could not be loaded.');
       if (cancelled) return;
       setBids(taskData.tasks);
-      if (taskData.tasks.length > 0) setActiveTask(taskData.tasks[0]);
+      setActiveTask(taskData.tasks[0] || emptyTask);
       setAgents(agentData.agents);
       setWorkspaceLoadError('');
     }).catch((error: unknown) => {
       if (!cancelled) setWorkspaceLoadError(error instanceof Error ? error.message : 'Account data could not be loaded.');
-    });
+    }).finally(() => { if (!cancelled) setWorkspaceLoading(false); });
     return () => { cancelled = true; };
   }, [persistentMode]);
 
@@ -80,7 +95,7 @@ export default function Home() {
     let cancelled = false;
     setChainTask(null);
     setChainError('');
-    if (!connected || !contractConfigured) return () => { cancelled = true; };
+    if (!connected || !contractConfigured || !activeTask.id) return () => { cancelled = true; };
     readEscrow(activeTask.id).then((task) => { if (!cancelled) setChainTask(task); }).catch((error) => {
       if (!cancelled) setChainError(error instanceof Error ? error.message : 'Unable to read escrow state from NEAR testnet.');
     });
@@ -101,11 +116,12 @@ export default function Home() {
     try {
       const candidate = workerAccountId.trim().toLowerCase();
       if (!isValidNearAccountId(candidate)) throw new Error('Enter a valid NEAR account ID.');
+      if (persistentMode && (!activeTask.selectedAgentId || !activeTask.workerAccountId)) throw new Error('Accept an agent bid before verifying its payout account.');
+      if (persistentMode && candidate !== activeTask.workerAccountId?.toLowerCase()) throw new Error('Use the payout account registered to the selected agent.');
       const contractId = getEscrowContractId();
       if (candidate === account || candidate === contractId) throw new Error('Worker payout account must differ from the owner and escrow contract.');
       await verifyTestnetAccount(candidate);
       setWorkerAccountId(candidate); setWorkerVerified(true); setWorkerCheck(`Verified on testnet: ${candidate}`);
-      setAgents((items) => items.map((agent) => agent.id === 'kemi' ? { ...agent, nearAccountId: candidate } : agent));
     } catch (error) {
       setWorkerCheck(error instanceof Error ? error.message : 'Could not verify worker account on testnet.');
     }
@@ -121,7 +137,8 @@ export default function Home() {
       if (action === 'create_escrow' && current) throw new Error('This task already has an on-chain escrow.');
       if (action !== 'create_escrow' && !current) throw new Error('Fund this task escrow first.');
       if (current && current.owner !== account) throw new Error(`Only escrow owner ${current.owner} can perform this action.`);
-      if (action === 'assign_worker' && (!workerVerified || !workerAccountId)) throw new Error('Verify the worker account on testnet before assigning it.');
+      if (action === 'assign_worker' && (!workerVerified || !workerAccountId)) throw new Error('Verify the worker payout account on testnet before assigning it.');
+      if (persistentMode && action === 'assign_worker' && (!activeTask.selectedAgentId || !activeTask.workerAccountId || workerAccountId.toLowerCase() !== activeTask.workerAccountId.toLowerCase())) throw new Error('Verify the selected agent payout account on testnet before assigning it.');
       if (action === 'approve_completion' && (!current?.worker || current.complete)) throw new Error('Assign a worker before approving completion.');
       if (action === 'release_payment' && (!current?.complete || current.settled)) throw new Error('Owner approval is required before releasing payment.');
       if (action === 'refund' && (!current || current.settled || (current.complete && !current.transfer_failed))) throw new Error('Refund is available only before approval or after a failed payout.');
@@ -178,15 +195,15 @@ export default function Home() {
         const response = await fetch('/api/tasks', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
-          body: JSON.stringify({ title: taskTitle.trim(), description: taskDescription.trim(), budgetNear: taskBudget, capabilities: ['Research'], deadlineAt, ownerNearAccountId: account || undefined }),
+          body: JSON.stringify({ title: taskTitle.trim(), description: taskDescription.trim(), budgetNear: taskBudget, capabilities: taskCapabilities.split(',').map((item) => item.trim()).filter(Boolean), deadlineAt, ownerNearAccountId: account || undefined }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Task could not be saved.');
         const created = data.task as Bid;
         setBids((current) => [created, ...current.filter((item) => item.id !== created.id)]);
         setActiveTask(created); setCreateOpen(false); setView('marketplace');
-        setTaskTitle(''); setTaskBudget(''); setTaskDescription(''); setTaskDeadlineDays('7'); setCreateIdempotencyKey(undefined);
-        notify('Task saved to your PostgreSQL workspace. Agent bidding is not enabled yet.');
+        setTaskTitle(''); setTaskBudget(''); setTaskDescription(''); setTaskCapabilities('Research'); setTaskDeadlineDays('7'); setCreateIdempotencyKey(undefined);
+        notify('Task saved to your PostgreSQL marketplace. Agents can now bid.');
       } catch (error) {
         notify(error instanceof Error ? error.message : 'Task could not be saved.');
       } finally { setTaskSaving(false); }
@@ -194,7 +211,7 @@ export default function Home() {
     }
     const created: Bid = { id: `task-${Date.now()}`, title: taskTitle.trim(), category: 'New task', agent: 'Awaiting bids', agentId: '—', amount, eta: 'Awaiting bids', score: '—', status: 'Open', color: 'gold', description: taskDescription.trim() };
     setBids((current) => [created, ...current]); setActiveTask(created); setCreateOpen(false); setView('marketplace');
-    setTaskTitle(''); setTaskBudget(''); setTaskDescription(''); setTaskDeadlineDays('7'); setTaskSaving(false); notify('Task posted to the local demo marketplace.');
+    setTaskTitle(''); setTaskBudget(''); setTaskDescription(''); setTaskCapabilities('Research'); setTaskDeadlineDays('7'); setTaskSaving(false); notify('Task posted to the local demo marketplace.');
   };
 
   const approve = () => runEscrowAction('approve_completion');
@@ -202,32 +219,57 @@ export default function Home() {
   return <main className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><span>av</span></div><div><b>AGENTVAULT</b><small>AGENT OPERATIONS</small></div><button className="icon-btn mobile-menu" aria-label="Menu"><Menu size={18}/></button></div>
-      <div className="workspace-switch"><span className="workspace-logo">N</span><div><b>Northstar Labs</b><small>Personal workspace</small></div><ChevronDown size={15}/></div>
+      <div className="workspace-switch"><span className="workspace-logo">N</span><div><b>{persistentMode ? 'Personal workspace' : 'Northstar Labs'}</b><small>Personal workspace</small></div><ChevronDown size={15}/></div>
       <div className="nav-label">WORKSPACE</div>
       <nav>{nav.map(({id,label,icon:Icon}) => <button key={id} className={`nav-item ${view===id?'active':''}`} onClick={() => setView(id)}><Icon size={17}/><span>{label}</span>{id==='workspace'&&<span className="nav-count">1</span>}</button>)}</nav>
       <div className="nav-label agents-label">YOUR AGENTS <button aria-label="Add agent" className="tiny-add" onClick={()=>setView('agents')}><Plus size={14}/></button></div>
-      <div className="mini-agent"><i className="agent-dot dot-green"/><span>Research agent</span><span className="tiny-status">IDLE</span></div>
-      <div className="mini-agent"><i className="agent-dot dot-blue"/><span>Dev agent</span><span className="tiny-status">IDLE</span></div>
-      <div className="mini-agent"><i className="agent-dot dot-purple"/><span>Analyst agent</span><span className="tiny-status">IDLE</span></div>
-      <div className="sidebar-bottom"><div className="network-card"><div className="network-head"><span className="live-dot"/> NETWORK TARGET <span className="network-test">TESTNET</span></div><div className="network-chain"><b>NEAR Protocol</b><span>RPC target · testnet</span></div><div className="network-bar"><i/></div></div><button className="nav-item"><Settings size={17}/><span>Settings</span></button><button className="nav-item"><CircleHelp size={17}/><span>Help &amp; docs</span><ArrowUpRight className="external" size={13}/></button><div className="user-card"><div className="avatar avatar-user">JD</div><div className="user-meta"><b>Jordan Davis</b><small>{connected?account:'Workspace owner'}</small></div><MoreHorizontal size={18}/></div></div>
+      {persistentMode ? (workspaceLoading ? <div className="mini-agent"><span>Loading agent profiles…</span></div> : myActiveAgents.length > 0 ? myActiveAgents.map((agent)=><div className="mini-agent" key={agent.id}><i className={"agent-dot dot-" + agent.color}/><span>{agent.name}</span><span className="tiny-status">{agent.status.toUpperCase()}</span></div>) : <div className="mini-agent"><span>No active agent profiles</span><button className="tiny-add" aria-label="Manage agents" onClick={()=>setView("agents")}><ArrowUpRight size={13}/></button></div>) : <><div className="mini-agent"><i className="agent-dot dot-green"/><span>Research agent</span><span className="tiny-status">IDLE</span></div><div className="mini-agent"><i className="agent-dot dot-blue"/><span>Dev agent</span><span className="tiny-status">IDLE</span></div><div className="mini-agent"><i className="agent-dot dot-purple"/><span>Analyst agent</span><span className="tiny-status">IDLE</span></div></>}
+      <div className="sidebar-bottom"><div className="network-card"><div className="network-head"><span className="live-dot"/> NETWORK TARGET <span className="network-test">TESTNET</span></div><div className="network-chain"><b>NEAR Protocol</b><span>RPC target · testnet</span></div><div className="network-bar"><i/></div></div><button className="nav-item"><Settings size={17}/><span>Settings</span></button><button className="nav-item"><CircleHelp size={17}/><span>Help &amp; docs</span><ArrowUpRight className="external" size={13}/></button><div className="user-card"><div className="avatar avatar-user">{persistentMode ? 'AV' : 'JD'}</div><div className="user-meta"><b>{persistentMode ? 'Your account' : 'Jordan Davis'}</b><small>{connected?account:persistentMode?'Authenticated workspace':'Workspace owner'}</small></div><MoreHorizontal size={18}/></div></div>
     </aside>
     <section className="main-column">
       <header className="topbar"><div className="breadcrumbs"><span>Workspace</span><span className="crumb-slash">/</span><b>{nav.find(n=>n.id===view)?.label}</b></div><div className="top-actions"><div className="network-pill"><span className="live-dot"/>NEAR testnet</div><button className="icon-btn notification" aria-label="Notifications"><Bell size={17}/><i/></button><button className={`connect-btn ${connected?'connected':''}`} onClick={()=>connected?notify(`Wallet ${account} is connected on testnet`):setWalletOpen(true)}><Wallet size={15}/>{connected?(account?`${account.slice(0,8)}…`:'Connected'):'Connect wallet'}{!connected&&<span className="button-dot"/>}</button><AccountControl/></div></header>
       <div className="content">
-        <div className="page-title-row"><div><div className="eyebrow"><span className="title-live"/>AUTONOMOUS WORKFORCE <span className="eyebrow-divider">/</span> {view.toUpperCase()} <span className="eyebrow-divider">/</span> {persistentMode?'ACCOUNT DATA':'DEMO DATA'}</div><h1>{view==='overview'?'Good morning, Jordan':view==='marketplace'?'Task marketplace':view==='workspace'?'Task workspace':view==='agents'?'Agent directory':'Treasury'}</h1><p className="page-subtitle">{view==='overview'?'Here’s what your agents have been working on.':view==='workspace'?'Track execution, review deliverables, and settle agent work.':view==='marketplace'?'Discover autonomous work and compare agent bids.':view==='agents'?'Your autonomous workforce, ready to take on work.':'Follow every escrow, payout, and refund on NEAR.'}</p></div><div className="title-actions"><button className="secondary-btn date-btn"><span className="date-icon">◷</span>Last 30 days<ChevronDown size={14}/></button><button className="primary-btn" onClick={()=>setCreateOpen(true)}><Plus size={16}/> Create task</button></div></div>
+        <div className="page-title-row"><div><div className="eyebrow"><span className="title-live"/>AUTONOMOUS WORKFORCE <span className="eyebrow-divider">/</span> {view.toUpperCase()} <span className="eyebrow-divider">/</span> {persistentMode?'ACCOUNT DATA':'DEMO DATA'}</div><h1>{view==='overview'?(persistentMode?'Your workspace':'Good morning, Jordan'):view==='marketplace'?'Task marketplace':view==='workspace'?'Task workspace':view==='agents'?'Agent directory':'Treasury'}</h1><p className="page-subtitle">{view==='overview'?(persistentMode?'Live tasks and agent profiles from your account.':'Here’s what your agents have been working on.'):view==='workspace'?'Track bids, revisions, approvals, and escrow activity.':view==='marketplace'?'Discover tasks, submit offers, and compare agent bids.':view==='agents'?'Register and manage agents in your workspace.':'Follow every escrow, payout, and refund on NEAR.'}</p></div><div className="title-actions"><button className="secondary-btn date-btn"><span className="date-icon">◷</span>Last 30 days<ChevronDown size={14}/></button><button className="primary-btn" onClick={()=>setCreateOpen(true)}><Plus size={16}/> Create task</button></div></div>
         {workspaceLoadError&&<div className="workspace-data-error" role="status">Account data is unavailable: {workspaceLoadError}</div>}
-        {view==='overview'&&<Overview setView={setView} setCreateOpen={setCreateOpen} approved={approved} openDemoTask={(task)=>{setActiveTask(task);setView('workspace')}} />}
-        {view==='workspace'&&<Workspace task={activeTask} approved={Boolean(chainTask?.complete)} onApprove={approve} bids={bids} connected={connected} onConnect={connectWallet} account={account} contractConfigured={contractConfigured} chainTask={chainTask} chainBusy={chainBusy} chainError={chainError} workerAccountId={workerAccountId} setWorkerAccountId={(value)=>{setWorkerAccountId(value);setWorkerVerified(false);setWorkerCheck('')}} workerVerified={workerVerified} workerCheck={workerCheck} verifyWorker={verifyWorker} onChainAction={runEscrowAction} receipts={receipts.filter((r)=>r.taskId===activeTask.id)} />}
-        {view==='marketplace'&&<Marketplace bids={bids} createTask={()=>setCreateOpen(true)} openTask={(task)=>{setActiveTask(task);setView('workspace')}} query={query} setQuery={setQuery} />}
-        {view==='agents'&&<Directory agents={shownAgents} query={query} setQuery={setQuery} />}
+        {view==='overview'&&(persistentMode?<PersistentOverview tasks={bids} agents={agents} loading={workspaceLoading} openTask={(task)=>{setActiveTask(task);setView('workspace')}} setView={setView} setCreateOpen={setCreateOpen}/>:<Overview setView={setView} setCreateOpen={setCreateOpen} approved={approved} openDemoTask={(task)=>{setActiveTask(task);setView('workspace')}} />)}
+        {view==='workspace'&&persistentMode&&(activeTask.id?<PersistentTaskWorkspace task={activeTask} agents={agents} onTaskChanged={updateActiveTask} connected={connected} onConnect={connectWallet} account={account} contractConfigured={contractConfigured} chainTask={chainTask} chainBusy={chainBusy} chainError={chainError} workerAccountId={workerAccountId} setWorkerAccountId={updateWorkerAccount} workerVerified={workerVerified} workerCheck={workerCheck} verifyWorker={verifyWorker} onChainAction={runEscrowAction} receipts={receipts.filter((r)=>r.taskId===activeTask.id)}/>:<div className="panel marketplace-empty"><h3>Select a task to open its workspace</h3><p>Open a task from the marketplace to compare bids and follow its persisted lifecycle.</p><button className="primary-btn" onClick={()=>setView('marketplace')}>Browse tasks</button></div>)}
+        {view==='workspace'&&!persistentMode&&<Workspace task={activeTask} approved={Boolean(chainTask?.complete)} onApprove={approve} bids={bids} connected={connected} onConnect={connectWallet} account={account} contractConfigured={contractConfigured} chainTask={chainTask} chainBusy={chainBusy} chainError={chainError} workerAccountId={workerAccountId} setWorkerAccountId={updateWorkerAccount} workerVerified={workerVerified} workerCheck={workerCheck} verifyWorker={verifyWorker} onChainAction={runEscrowAction} receipts={receipts.filter((r)=>r.taskId===activeTask.id)} />}
+        {view==='marketplace'&&(persistentMode?<PersistentMarketplace tasks={bids} loading={workspaceLoading} createTask={()=>setCreateOpen(true)} openTask={(task)=>{setActiveTask(task);setView('workspace')}} query={query} setQuery={setQuery}/>:<Marketplace bids={bids} createTask={()=>setCreateOpen(true)} openTask={(task)=>{setActiveTask(task);setView('workspace')}} query={query} setQuery={setQuery}/>)}
+        {view==='agents'&&<AgentDirectory agents={agents} query={query} setQuery={setQuery} persistentMode={persistentMode} loading={workspaceLoading} onAgentsChange={setAgents} />}
         {view==='treasury'&&<Treasury connected={connected} onConnect={()=>setWalletOpen(true)} receipts={receipts} />}
         <footer><span>© 2026 AGENTVAULT</span><span>BUILT FOR AGENT ECONOMY <i className="footer-dot"/> NEAR BUILD BEYOND BOUNDARIES</span><span className="footer-version">v0.9.4 <span>·</span> {persistentMode?'ACCOUNT DATA MODE':'DEMO ENVIRONMENT'}</span></footer>
       </div>
     </section>
     {walletOpen&&<div className="modal-backdrop" onMouseDown={(e)=>e.target===e.currentTarget&&setWalletOpen(false)}><div className="modal wallet-modal"><button className="modal-close" onClick={()=>setWalletOpen(false)} aria-label="Close"><X size={18}/></button><div className="modal-icon"><Wallet size={21}/></div><div className="modal-kicker">CONNECT TO NEAR TESTNET</div><h2>Connect your wallet</h2><p>Choose a NEAR wallet to sign in. AGENTVAULT never asks for your seed phrase or private key.</p><button className="wallet-choice" onClick={connectWallet}><span className="wallet-logo near-logo">N</span><span><b>Connect with NEAR</b><small>Wallets available through NEAR Connect</small></span><ArrowUpRight size={16}/></button><div className="modal-foot"><LockKeyhole size={13}/>Transactions require your explicit wallet signature.</div></div></div>}
-    {createOpen&&<div className="modal-backdrop" onMouseDown={(e)=>e.target===e.currentTarget&&setCreateOpen(false)}><form className="modal create-modal" onSubmit={createTask}><button type="button" className="modal-close" onClick={()=>setCreateOpen(false)} aria-label="Close"><X size={18}/></button><div className="modal-icon"><Plus size={21}/></div><div className="modal-kicker">NEW WORK ORDER</div><h2>Create a task</h2><p>{persistentMode?'Save a task to your account. Agent bidding and assignment are not enabled yet.':'Define the outcome for the local demo marketplace.'}</p><label>Task title<input value={taskTitle} onChange={e=>{setTaskTitle(e.target.value);setCreateIdempotencyKey(undefined)}} placeholder="e.g. Map emerging AI startups in East Africa" required minLength={4}/></label><label>Task brief<textarea value={taskDescription} onChange={e=>{setTaskDescription(e.target.value);setCreateIdempotencyKey(undefined)}} placeholder="Describe the deliverable, scope, and what a good result looks like…" required minLength={20}/></label><div className="form-grid"><label>Budget<input type="number" min="0.001" step="0.001" value={taskBudget} onChange={e=>{setTaskBudget(e.target.value);setCreateIdempotencyKey(undefined)}} placeholder="0.50" required/><small>NEAR</small></label><label>Deadline<select value={taskDeadlineDays} onChange={(e)=>{setTaskDeadlineDays(e.target.value);setCreateIdempotencyKey(undefined)}}><option value="3">3 days</option><option value="7">7 days</option><option value="14">14 days</option></select></label></div><label>Capabilities <div className="capability-tags"><span>Research <X size={12}/></span><button type="button" onClick={()=>notify('Capability selection is fixed to Research in this workflow.')}><Plus size={13}/> Add</button></div></label><button className="primary-btn modal-submit" type="submit" disabled={taskSaving}><Sparkles size={16}/>{taskSaving?'Saving…':persistentMode?'Save task':'Add demo task'}</button><div className="modal-foot"><ShieldCheck size={13}/>{persistentMode?'Stored in your account database. NEAR actions still require a connected wallet signature.':'Demo task stays in this browser session. Funding requires a connected wallet.'}</div></form></div>}
+    {createOpen&&<div className="modal-backdrop" onMouseDown={(e)=>e.target===e.currentTarget&&setCreateOpen(false)}><form className="modal create-modal" onSubmit={createTask}><button type="button" className="modal-close" onClick={()=>setCreateOpen(false)} aria-label="Close"><X size={18}/></button><div className="modal-icon"><Plus size={21}/></div><div className="modal-kicker">NEW WORK ORDER</div><h2>Create a task</h2><p>{persistentMode?'Save a PostgreSQL task for agents to bid on and for owners to assign.':'Define the outcome for the local demo marketplace.'}</p><label>Task title<input value={taskTitle} onChange={e=>{setTaskTitle(e.target.value);setCreateIdempotencyKey(undefined)}} placeholder="e.g. Map emerging AI startups in East Africa" required minLength={4}/></label><label>Task brief<textarea value={taskDescription} onChange={e=>{setTaskDescription(e.target.value);setCreateIdempotencyKey(undefined)}} placeholder="Describe the deliverable, scope, and what a good result looks like…" required minLength={20}/></label><div className="form-grid"><label>Budget<input type="number" min="0.001" step="0.001" value={taskBudget} onChange={e=>{setTaskBudget(e.target.value);setCreateIdempotencyKey(undefined)}} placeholder="0.50" required/><small>NEAR</small></label><label>Deadline<select value={taskDeadlineDays} onChange={(e)=>{setTaskDeadlineDays(e.target.value);setCreateIdempotencyKey(undefined)}}><option value="3">3 days</option><option value="7">7 days</option><option value="14">14 days</option></select></label></div><label>Capabilities<input value={taskCapabilities} onChange={e=>{setTaskCapabilities(e.target.value);setCreateIdempotencyKey(undefined)}} placeholder="Research, Data analysis"/><small>Separate capabilities with commas.</small></label><button className="primary-btn modal-submit" type="submit" disabled={taskSaving}><Sparkles size={16}/>{taskSaving?'Saving…':persistentMode?'Save task':'Add demo task'}</button><div className="modal-foot"><ShieldCheck size={13}/>{persistentMode?'Stored in your account database. NEAR actions still require a connected wallet signature.':'Demo task stays in this browser session. Funding requires a connected wallet.'}</div></form></div>}
     {toast&&<div className="toast"><BadgeCheck size={16}/>{toast}<button onClick={()=>setToast('')} aria-label="Dismiss"><X size={14}/></button></div>}
   </main>;
+}
+
+function PersistentOverview({tasks,agents,loading,openTask,setView,setCreateOpen}:{tasks:Bid[];agents:Agent[];loading:boolean;openTask:(task:Bid)=>void;setView:(view:View)=>void;setCreateOpen:(open:boolean)=>void}) {
+  const active = tasks.filter((task) => !['Completed','Cancelled'].includes(task.status)).length;
+  const open = tasks.filter((task) => task.status === 'Open').length;
+  const awaitingReview = tasks.filter((task) => task.status === 'In review').length;
+  const availableAgents = agents.filter((agent) => agent.isActive && agent.availability === 'available').length;
+  return <>
+    <div className="agent-summary"><div className="panel agent-summary-card"><span>YOUR TASKS</span><b>{tasks.length} <small>records</small></b><p>{active} active · {awaitingReview} awaiting review</p></div><div className="panel agent-summary-card"><span>OPEN FOR BIDS</span><b>{open} <small>tasks</small></b><p>Tasks available to registered agents</p></div><div className="panel agent-summary-card"><span>AVAILABLE AGENTS</span><b>{availableAgents} <small>profiles</small></b><p>Active accounts accepting offers</p></div><div className="agent-filters"><button className="secondary-btn" onClick={()=>setView('marketplace')}>Open marketplace <ArrowUpRight size={14}/></button><button className="primary-btn" onClick={()=>setCreateOpen(true)}><Plus size={15}/> Create task</button></div></div>
+    <div className="section-heading"><div><h2>Recent tasks</h2><p>PostgreSQL account records, ordered by creation time</p></div><button className="text-link" onClick={()=>setView('marketplace')}>View marketplace <ArrowUpRight size={14}/></button></div>
+    {loading ? <div className="panel marketplace-empty" role="status">Loading your task workspace…</div> : tasks.length === 0 ? <div className="panel marketplace-empty"><div className="modal-icon"><BriefcaseBusiness size={18}/></div><h3>No account tasks yet</h3><p>Create the first persistent task. New tasks appear in the marketplace and can receive bids from registered agent owners.</p><button className="primary-btn" onClick={()=>setCreateOpen(true)}><Plus size={15}/> Create task</button></div> : <div className="panel task-table"><div className="table-header"><span>TASK</span><span>ASSIGNED AGENT</span><span>STATUS</span><span>BUDGET</span><span>DEADLINE</span><span/></div>{tasks.slice(0,8).map((task) => <TaskRow key={task.id} icon="research" title={task.title} category={task.category} agent={task.agent} initials={task.agentId} status={task.status} budget={`${task.amount.toFixed(3)} NEAR`} updated={task.deadlineAt ? new Date(task.deadlineAt).toLocaleDateString() : 'No deadline'} onClick={()=>openTask(task)}/>)}</div>}
+    <div className="workspace-demo-note">Account mode · charts, seeded research report, and treasury demo ledger remain illustrative.</div>
+  </>;
+}
+
+function PersistentMarketplace({tasks,loading,createTask,openTask,query,setQuery}:{tasks:Bid[];loading:boolean;createTask:()=>void;openTask:(task:Bid)=>void;query:string;setQuery:(value:string)=>void}) {
+  const visibleTasks=tasks.filter((task)=>`${task.title} ${task.description || ''} ${task.category} ${task.agent}`.toLowerCase().includes(query.toLowerCase()));
+  const openCount=tasks.filter((task)=>task.status==='Open').length;
+  const bidCount=tasks.reduce((total,task)=>total+(task.bidCount||0),0);
+  const averageBudget=tasks.length?tasks.reduce((total,task)=>total+task.amount,0)/tasks.length:0;
+  return <>
+    <div className="marketplace-summary"><div className="panel market-stat"><span>OPEN TASKS</span><b>{openCount}</b><small>From your authorized marketplace view</small></div><div className="panel market-stat"><span>RECORDED BIDS</span><b>{bidCount}</b><small>Submitted database offers</small></div><div className="panel market-stat"><span>AVERAGE BUDGET</span><b>{averageBudget.toFixed(3)} <small>NEAR</small></b><small>Across {tasks.length} visible tasks</small></div><div className="panel market-callout"><div><span className="modal-kicker">PERSISTENT MARKETPLACE</span><b>Post a task or submit an agent bid.</b></div><button className="primary-btn" onClick={createTask}><Plus size={15}/> Create task</button></div></div>
+    <div className="market-controls"><div className="search-field"><Search size={16}/><input placeholder="Search tasks, capabilities, or agents…" value={query} onChange={(event)=>setQuery(event.target.value)}/><kbd>⌘ K</kbd></div><span className="market-scope-label">ACCOUNT + OPEN MARKETPLACE RECORDS</span></div>
+    {loading?<div className="panel marketplace-empty" role="status">Loading task records…</div>:visibleTasks.length===0?<div className="panel marketplace-empty"><h3>{tasks.length?'No tasks match this search':'No tasks available yet'}</h3><p>{tasks.length?'Try another search.':'Create a persistent task to start receiving agent bids.'}</p><button className="primary-btn" onClick={createTask}><Plus size={15}/> Create task</button></div>:<div className="market-list">{visibleTasks.map((task)=><button key={task.id} className="market-row" onClick={()=>openTask(task)}><div className={`task-type type-${task.category.toLowerCase().includes('research')?'research':task.category.toLowerCase().includes('develop')?'code':'analysis'}`}><Search size={17}/></div><div className="market-task"><div><span className="market-category">{task.category} <i>·</i> <span className={`market-status market-${task.status.toLowerCase().replace(' ','-')}`}>{task.status}</span></span><h3>{task.title}</h3><p>{task.description}</p><div className="market-skills">{task.category.split(',').map((skill)=> <i key={skill}>{skill.trim()}</i>)}</div></div></div><div className="market-agent"><span className="avatar avatar-green">{task.agentId.slice(0,2)}</span><span><b>{task.agent}</b><small>{task.bidCount||0} bids · task record</small></span></div><div className="market-bid"><b>{task.amount.toFixed(3)} <small>NEAR</small></b><span><Clock3 size={13}/>{task.eta}</span></div><ArrowUpRight size={16} className="market-arrow"/></button>)}</div>}
+    <div className="market-footer"><span>Showing <b>{visibleTasks.length} of {tasks.length}</b> account-visible tasks</span></div>
+  </>;
 }
 
 function Overview({setView,setCreateOpen,approved,openDemoTask}:{setView:(v:View)=>void;setCreateOpen:(v:boolean)=>void;approved:boolean;openDemoTask:(task:Bid)=>void}) {

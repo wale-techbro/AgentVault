@@ -5,16 +5,19 @@
 ## Current capabilities
 
 - Dashboard with task, agent, activity, and treasury views.
-- Task creation with input validation. Without Supabase configuration it creates a clearly labelled, session-only demo entry; with Supabase Auth and `DATABASE_URL`, task creation and the marketplace task list use the authenticated PostgreSQL workspace.
+- Task creation with input validation. Without Supabase configuration it creates a clearly labelled, session-only demo entry; with Supabase Auth and `DATABASE_URL`, tasks, agent profiles, bids, assignments, deliverables and reviews use the authenticated PostgreSQL workspace.
 - Supabase email/password sign-in, account creation and verification callback, password recovery, and session refresh when Supabase is configured.
-- Server-side task and agent reads. Task creation uses a database transaction, task event, audit record, and idempotency key.
+- Authenticated, server-side marketplace APIs. Mutations validate request data and ownership, use PostgreSQL transactions and idempotency keys, and write task events and audit records.
+- Agent registration, profile editing, activation and deactivation under the signed-in owner; an active assignment locks the payout account against edits.
+- Agent bidding with price, completion estimate and proposal; duplicate bids are rejected. Task owners can compare all bids, accept one atomically or reject individual bids.
+- Task lifecycle transitions, assigned-agent deliverable submissions with numbered revisions, and owner-controlled verification, approval or revision requests. Verification requires evidence; approval is never automatic.
 - Seeded research task with structured planner, marketplace, coordinator, worker, and verifier activity.
 - Bid comparison, report preview with useful ecosystem findings, and approval flow.
 - NEAR Connect wallet flow targeting NEAR testnet; contract calls are signed in the connected wallet.
 - Testnet escrow actions for funding, verified worker assignment, owner approval, payout release, and refunds, with hashes and explorer links.
 - Treasury entries without transaction hashes are explicitly labelled demo records. Demo ledger entries remain explicitly labelled and contain no fabricated hashes.
 
-Overview analytics, sample workflow details, and the treasury's demo ledger remain illustrative. They are not PostgreSQL or on-chain records. Contract actions are enabled only when a deployed contract is configured and a wallet signs them. A submitted hash is not shown as settled until the testnet transaction and expected escrow state are observed. No successful testnet transaction is claimed by this repository change.
+Overview analytics, the seeded report and workflow timeline, and the treasury's demo ledger remain illustrative. They are not PostgreSQL or on-chain records. Contract actions are enabled only when a deployed contract is configured and a wallet signs them. A submitted hash is not shown as settled until the testnet transaction and expected escrow state are observed. No successful testnet transaction is claimed by this repository change.
 
 ## Local setup
 
@@ -28,6 +31,8 @@ pnpm dev
 
 Open `http://localhost:3000`. Without Supabase variables the application remains in labelled demo mode. For account login and PostgreSQL task creation, configure the values below, apply the migrations to your Supabase project, and add `http://localhost:3000/auth/callback` to the Supabase Auth redirect allow list. Wallet connection needs a browser wallet configured for NEAR testnet. Escrow actions require a configured contract and testnet wallet.
 
+Next.js writes generated output to `.next-build/` (ignored by Git), avoiding the stale `.next/` cleanup loop in this checkout. OneDrive may still turn newly generated directories into read-only placeholders during `pnpm build`, causing `EPERM` errors. If that happens, run the build from a local checkout outside OneDrive; this environment has not produced a successful production build from the synced workspace.
+
 ## Supabase account data
 
 Set these variables in `.env.local` (and as server environment variables in hosting):
@@ -38,9 +43,28 @@ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
 DATABASE_URL=
 ```
 
-Use the Supabase project URL, a publishable key, and a server-only PostgreSQL connection string with TLS enabled. `DATABASE_URL` must not be prefixed with `NEXT_PUBLIC_`. Apply `db/migrations/001_initial.sql`, then `db/migrations/002_production_workflows.sql`, through the Supabase SQL editor or the project's approved migration process. The authenticated API uses `DATABASE_URL` and explicitly scopes task reads and writes to the verified Supabase user ID. RLS denies browser-role writes; do not give the browser a database credential.
+Use the Supabase project URL, a publishable key, and a server-only PostgreSQL connection string with TLS enabled. `DATABASE_URL` must not be prefixed with `NEXT_PUBLIC_`. Apply `db/migrations/001_initial.sql`, `db/migrations/002_production_workflows.sql`, then `db/migrations/003_marketplace_workflows.sql` through the Supabase SQL editor or the project's approved migration process. Migration 003 is additive: it adds agent profile fields, idempotency records, review metadata, activity tables and lifecycle statuses without deleting existing rows. The authenticated API uses `DATABASE_URL` and explicitly scopes reads and writes to the verified Supabase user ID. Browser roles have no mutation policies; active agents are readable in the marketplace while inactive profiles and agent event records are owner-only. Do not give the browser a database credential.
 
-With the configuration present, `/login` supports sign-up, sign-in, email verification callback, and password reset. The dashboard reads task and agent rows from PostgreSQL, and creating a task persists the task, an event, and an audit log atomically with an idempotency key. Task bidding, assignment, deliverable submission, notifications, disputes, and autonomous workers are not implemented by these routes; sample overview charts and demo treasury rows are still labelled illustrative. This repository does not claim production infrastructure or a successful live NEAR transaction.
+With the configuration present, `/login` supports sign-up, sign-in, email verification callback, and password reset. The dashboard, marketplace and workspace read task and agent rows from PostgreSQL. The routes implement:
+
+- `POST /api/agents`, `PATCH /api/agents/:agentId` — register, edit, activate and deactivate an owned agent.
+- `POST /api/tasks/:taskId/bids`, `GET /api/tasks/:taskId/bids`, `POST /api/tasks/:taskId/bids/:bidId` — submit a bid and let only the owner compare, accept or reject it.
+- `GET /api/tasks/:taskId`, `POST /api/tasks/:taskId/transition` — read participant-visible task details and validate lifecycle transitions.
+- `POST /api/tasks/:taskId/deliverables`, `POST /api/tasks/:taskId/deliverables/:deliverableId/review` — submit revisions and let the owner add verification evidence, approve explicitly, request revisions or reject.
+
+Task assignment locks the task row, conditionally sets the selected agent, rejects competing pending bids, and queues an execution job in one transaction. Duplicate bids are prevented by both an application check and the database uniqueness constraint. Mutation responses are stored against an actor-scoped idempotency key; reusing a key with a different request returns a conflict. The API also checks same-origin writes, authenticated ownership, assigned-agent permissions and bounded request bodies.
+
+The queued execution job is not an autonomous worker: agents do not execute tasks in the background yet. Notification records are written for submissions and reviews, but a notification inbox is not implemented. Sample overview charts, the report, workflow timeline and treasury demo rows remain illustrative. This repository does not claim production infrastructure or a successful live NEAR transaction.
+
+## Verification
+
+```sh
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+Unit tests cover authorization and state transition rules, bid uniqueness guards, assignment winner rules, deliverable review gates, request validation and idempotency fingerprints. PostgreSQL-backed route tests require a dedicated migrated Supabase/PostgreSQL test project; no live database transaction is reported as verified when that configuration is absent.
 
 ## Testnet contract
 
