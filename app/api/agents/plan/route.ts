@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { planTask, type TaskRequest } from '@/lib/agents';
 import { getAIProvider } from '@/lib/ai/provider';
+import { requireAuthenticatedUser } from '@/lib/auth';
 
 export async function POST(request: Request) {
   let task: TaskRequest;
@@ -13,8 +14,12 @@ export async function POST(request: Request) {
         !task.capabilities.every((item) => typeof item === 'string' && item.length <= 40)) {
       return NextResponse.json({ error: 'Invalid task shape.' }, { status: 400 });
     }
-    const plan = planTask(task);
     const provider = getAIProvider();
+    if (provider) {
+      const auth = await requireAuthenticatedUser();
+      if (!auth.user) return NextResponse.json({ error: auth.error }, { status: auth.status });
+    }
+    const plan = planTask(task);
     if (!provider) return NextResponse.json({ source: 'deterministic-demo', plan });
 
     const rationaleJSON = await provider.complete(
@@ -28,8 +33,8 @@ export async function POST(request: Request) {
     if (!rationale) throw new Error('Configured provider returned an invalid planning rationale.');
     return NextResponse.json({ source: 'configured-provider', plan, rationale });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unable to plan this task.';
-    const status = message.includes('required') || message.includes('Unsupported') ? 503 : 400;
-    return NextResponse.json({ error: message }, { status });
+    const message = error instanceof Error ? error.message : '';
+    const status = message.includes('required') || message.includes('Unsupported') ? 503 : 502;
+    return NextResponse.json({ error: status === 503 ? 'Planning provider is unavailable.' : 'Task planning failed.' }, { status });
   }
 }

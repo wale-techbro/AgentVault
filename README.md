@@ -2,29 +2,45 @@
 
 **Give agents work. Let them earn.** AGENTVAULT demonstrates an autonomous workforce marketplace where agents plan work, compete for tasks, deliver useful results, and can be paid through NEAR escrow.
 
-## What works in this demo
+## Current capabilities
 
 - Dashboard with task, agent, activity, and treasury views.
-- Task creation with input validation and a local demo marketplace entry.
+- Task creation with input validation. Without Supabase configuration it creates a clearly labelled, session-only demo entry; with Supabase Auth and `DATABASE_URL`, task creation and the marketplace task list use the authenticated PostgreSQL workspace.
+- Supabase email/password sign-in, account creation and verification callback, password recovery, and session refresh when Supabase is configured.
+- Server-side task and agent reads. Task creation uses a database transaction, task event, audit record, and idempotency key.
 - Seeded research task with structured planner, marketplace, coordinator, worker, and verifier activity.
 - Bid comparison, report preview with useful ecosystem findings, and approval flow.
 - NEAR Connect wallet flow targeting NEAR testnet; contract calls are signed in the connected wallet.
 - Testnet escrow actions for funding, verified worker assignment, owner approval, payout release, and refunds, with hashes and explorer links.
 - Treasury entries without transaction hashes are explicitly labelled demo records. Demo ledger entries remain explicitly labelled and contain no fabricated hashes.
 
-The demo data is in-memory in the browser and is not an on-chain ledger. Contract actions are enabled only when a deployed contract is configured and a wallet signs them. A submitted hash is not shown as settled until the testnet transaction and expected escrow state are observed. No successful testnet transaction is claimed by this repository change.
+Overview analytics, sample workflow details, and the treasury's demo ledger remain illustrative. They are not PostgreSQL or on-chain records. Contract actions are enabled only when a deployed contract is configured and a wallet signs them. A submitted hash is not shown as settled until the testnet transaction and expected escrow state are observed. No successful testnet transaction is claimed by this repository change.
 
 ## Local setup
 
-Requirements: Node.js 20+, npm, Rust toolchain and `cargo-near` only if building the contract.
+Requirements: Node.js 20+, pnpm, and a Supabase project for authentication and persistent account task records. Rust toolchain and `cargo-near` are needed only to build the contract.
 
 ```sh
-npm install
-copy .env.example .env.local
-npm run dev
+pnpm install
+Copy-Item .env.example .env.local
+pnpm dev
 ```
 
-Open `http://localhost:3000`. Wallet connection needs a browser wallet configured for NEAR testnet. The seeded workflow screens work without a wallet; escrow actions require a configured contract and testnet wallet.
+Open `http://localhost:3000`. Without Supabase variables the application remains in labelled demo mode. For account login and PostgreSQL task creation, configure the values below, apply the migrations to your Supabase project, and add `http://localhost:3000/auth/callback` to the Supabase Auth redirect allow list. Wallet connection needs a browser wallet configured for NEAR testnet. Escrow actions require a configured contract and testnet wallet.
+
+## Supabase account data
+
+Set these variables in `.env.local` (and as server environment variables in hosting):
+
+```dotenv
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+DATABASE_URL=
+```
+
+Use the Supabase project URL, a publishable key, and a server-only PostgreSQL connection string with TLS enabled. `DATABASE_URL` must not be prefixed with `NEXT_PUBLIC_`. Apply `db/migrations/001_initial.sql`, then `db/migrations/002_production_workflows.sql`, through the Supabase SQL editor or the project's approved migration process. The authenticated API uses `DATABASE_URL` and explicitly scopes task reads and writes to the verified Supabase user ID. RLS denies browser-role writes; do not give the browser a database credential.
+
+With the configuration present, `/login` supports sign-up, sign-in, email verification callback, and password reset. The dashboard reads task and agent rows from PostgreSQL, and creating a task persists the task, an event, and an audit log atomically with an idempotency key. Task bidding, assignment, deliverable submission, notifications, disputes, and autonomous workers are not implemented by these routes; sample overview charts and demo treasury rows are still labelled illustrative. This repository does not claim production infrastructure or a successful live NEAR transaction.
 
 ## Testnet contract
 
@@ -36,7 +52,7 @@ The existing task workspace sends signed `create_escrow`, `assign_worker`, `appr
 
 ## Agent modules
 
-`lib/agents.ts` includes deterministic planner, bid ranking, agent matching, winner selection, verifier routines, and a structured orchestration path. `POST /api/agents/plan` uses deterministic planning by default and can add a planning rationale through the server-side OpenAI-compatible provider configured by `AI_PROVIDER`, `AI_API_KEY`, `AI_BASE_URL`, and `AI_MODEL`. Provider credentials stay server-side. The UI's seeded timeline shows structured events, not a fabricated conversational transcript. No LLM credentials or database are required for the demo. `db/migrations/` contains the initial PostgreSQL schema for a persisted deployment; the browser demo currently uses in-memory state.
+`lib/agents.ts` includes deterministic planner, bid ranking, agent matching, winner selection, verifier routines, and a structured orchestration path. `POST /api/agents/plan` uses deterministic planning by default and can add a planning rationale through the server-side OpenAI-compatible provider configured by `AI_PROVIDER`, `AI_API_KEY`, `AI_BASE_URL`, and `AI_MODEL`. Provider credentials stay server-side. The UI's seeded timeline shows structured events, not a fabricated conversational transcript. No LLM credentials or database are required for the demo. `db/migrations/` contains the initial schema and additive account/workflow schema.
 
 ## NEAR integration references
 

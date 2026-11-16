@@ -8,6 +8,7 @@ import {
   ShieldCheck, Sparkles, Wallet, X, Zap,
 } from 'lucide-react';
 import { demoAgents, demoBids, demoReport, type Agent, type Bid } from '@/lib/demo';
+import AccountControl from '@/components/account-control';
 import { connectNearWallet, getEscrowContractId, isValidNearAccountId, nearExplorerUrl, readEscrow, signEscrowCall, toYoctoNear, verifyTestnetAccount, waitForEscrow, waitForTransaction, type EscrowCall, type EscrowView } from '@/lib/near/client';
 
 type View = 'overview' | 'marketplace' | 'workspace' | 'agents' | 'treasury';
@@ -35,6 +36,10 @@ export default function Home() {
   const [taskTitle, setTaskTitle] = useState('');
   const [taskBudget, setTaskBudget] = useState('');
   const [taskDescription, setTaskDescription] = useState('');
+  const [taskDeadlineDays, setTaskDeadlineDays] = useState('7');
+  const [taskSaving, setTaskSaving] = useState(false);
+  const [createIdempotencyKey, setCreateIdempotencyKey] = useState<string>();
+  const [workspaceLoadError, setWorkspaceLoadError] = useState('');
   const [agents, setAgents] = useState<Agent[]>(demoAgents);
   const [workerAccountId, setWorkerAccountId] = useState(demoAgents[0].nearAccountId);
   const [workerVerified, setWorkerVerified] = useState(false);
@@ -44,9 +49,32 @@ export default function Home() {
   const [chainError, setChainError] = useState('');
   const [receipts, setReceipts] = useState<ChainReceipt[]>([]);
   const contractConfigured = Boolean(process.env.NEXT_PUBLIC_ESCROW_CONTRACT_ID?.trim());
+  const persistentMode = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() && (process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim() || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()));
 
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 3600); };
   const shownAgents = useMemo(() => agents.filter((a) => `${a.name} ${a.role} ${a.skills.join(' ')}`.toLowerCase().includes(query.toLowerCase())), [agents, query]);
+
+  useEffect(() => {
+    if (!persistentMode) return;
+    let cancelled = false;
+    void Promise.all([
+      fetch('/api/tasks', { cache: 'no-store' }),
+      fetch('/api/agents', { cache: 'no-store' }),
+    ]).then(async ([taskResponse, agentResponse]) => {
+      const taskData = await taskResponse.json();
+      if (!taskResponse.ok) throw new Error(typeof taskData.error === 'string' ? taskData.error : 'Workspace tasks could not be loaded.');
+      const agentData = await agentResponse.json();
+      if (!agentResponse.ok) throw new Error(typeof agentData.error === 'string' ? agentData.error : 'Agents could not be loaded.');
+      if (cancelled) return;
+      setBids(taskData.tasks);
+      if (taskData.tasks.length > 0) setActiveTask(taskData.tasks[0]);
+      setAgents(agentData.agents);
+      setWorkspaceLoadError('');
+    }).catch((error: unknown) => {
+      if (!cancelled) setWorkspaceLoadError(error instanceof Error ? error.message : 'Account data could not be loaded.');
+    });
+    return () => { cancelled = true; };
+  }, [persistentMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -134,15 +162,39 @@ export default function Home() {
     }
   };
 
-  const createTask = (event: React.FormEvent<HTMLFormElement>) => {
+  const createTask = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const amount = Number(taskBudget);
     if (taskTitle.trim().length < 4 || taskDescription.trim().length < 20 || !Number.isFinite(amount) || amount <= 0) {
       notify('Add a clear title, 20+ character brief, and a budget above 0.'); return;
     }
+    if (taskSaving) return;
+    setTaskSaving(true);
+    if (persistentMode) {
+      const idempotencyKey = createIdempotencyKey || crypto.randomUUID();
+      setCreateIdempotencyKey(idempotencyKey);
+      try {
+        const deadlineAt = new Date(Date.now() + Number(taskDeadlineDays) * 24 * 60 * 60 * 1000).toISOString();
+        const response = await fetch('/api/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+          body: JSON.stringify({ title: taskTitle.trim(), description: taskDescription.trim(), budgetNear: taskBudget, capabilities: ['Research'], deadlineAt, ownerNearAccountId: account || undefined }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Task could not be saved.');
+        const created = data.task as Bid;
+        setBids((current) => [created, ...current.filter((item) => item.id !== created.id)]);
+        setActiveTask(created); setCreateOpen(false); setView('marketplace');
+        setTaskTitle(''); setTaskBudget(''); setTaskDescription(''); setTaskDeadlineDays('7'); setCreateIdempotencyKey(undefined);
+        notify('Task saved to your PostgreSQL workspace. Agent bidding is not enabled yet.');
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'Task could not be saved.');
+      } finally { setTaskSaving(false); }
+      return;
+    }
     const created: Bid = { id: `task-${Date.now()}`, title: taskTitle.trim(), category: 'New task', agent: 'Awaiting bids', agentId: '—', amount, eta: 'Awaiting bids', score: '—', status: 'Open', color: 'gold', description: taskDescription.trim() };
     setBids((current) => [created, ...current]); setActiveTask(created); setCreateOpen(false); setView('marketplace');
-    setTaskTitle(''); setTaskBudget(''); setTaskDescription(''); notify('Task posted to the local demo marketplace.');
+    setTaskTitle(''); setTaskBudget(''); setTaskDescription(''); setTaskDeadlineDays('7'); setTaskSaving(false); notify('Task posted to the local demo marketplace.');
   };
 
   const approve = () => runEscrowAction('approve_completion');
@@ -160,19 +212,20 @@ export default function Home() {
       <div className="sidebar-bottom"><div className="network-card"><div className="network-head"><span className="live-dot"/> NETWORK TARGET <span className="network-test">TESTNET</span></div><div className="network-chain"><b>NEAR Protocol</b><span>RPC target · testnet</span></div><div className="network-bar"><i/></div></div><button className="nav-item"><Settings size={17}/><span>Settings</span></button><button className="nav-item"><CircleHelp size={17}/><span>Help &amp; docs</span><ArrowUpRight className="external" size={13}/></button><div className="user-card"><div className="avatar avatar-user">JD</div><div className="user-meta"><b>Jordan Davis</b><small>{connected?account:'Workspace owner'}</small></div><MoreHorizontal size={18}/></div></div>
     </aside>
     <section className="main-column">
-      <header className="topbar"><div className="breadcrumbs"><span>Workspace</span><span className="crumb-slash">/</span><b>{nav.find(n=>n.id===view)?.label}</b></div><div className="top-actions"><div className="network-pill"><span className="live-dot"/>NEAR testnet</div><button className="icon-btn notification" aria-label="Notifications"><Bell size={17}/><i/></button><button className={`connect-btn ${connected?'connected':''}`} onClick={()=>connected?notify(`Wallet ${account} is connected on testnet`):setWalletOpen(true)}><Wallet size={15}/>{connected?(account?`${account.slice(0,8)}…`:'Connected'):'Connect wallet'}{!connected&&<span className="button-dot"/>}</button></div></header>
+      <header className="topbar"><div className="breadcrumbs"><span>Workspace</span><span className="crumb-slash">/</span><b>{nav.find(n=>n.id===view)?.label}</b></div><div className="top-actions"><div className="network-pill"><span className="live-dot"/>NEAR testnet</div><button className="icon-btn notification" aria-label="Notifications"><Bell size={17}/><i/></button><button className={`connect-btn ${connected?'connected':''}`} onClick={()=>connected?notify(`Wallet ${account} is connected on testnet`):setWalletOpen(true)}><Wallet size={15}/>{connected?(account?`${account.slice(0,8)}…`:'Connected'):'Connect wallet'}{!connected&&<span className="button-dot"/>}</button><AccountControl/></div></header>
       <div className="content">
-        <div className="page-title-row"><div><div className="eyebrow"><span className="title-live"/>AUTONOMOUS WORKFORCE <span className="eyebrow-divider">/</span> {view.toUpperCase()} <span className="eyebrow-divider">/</span> DEMO DATA</div><h1>{view==='overview'?'Good morning, Jordan':view==='marketplace'?'Task marketplace':view==='workspace'?'Task workspace':view==='agents'?'Agent directory':'Treasury'}</h1><p className="page-subtitle">{view==='overview'?'Here’s what your agents have been working on.':view==='workspace'?'Track execution, review deliverables, and settle agent work.':view==='marketplace'?'Discover autonomous work and compare agent bids.':view==='agents'?'Your autonomous workforce, ready to take on work.':'Follow every escrow, payout, and refund on NEAR.'}</p></div><div className="title-actions"><button className="secondary-btn date-btn"><span className="date-icon">◷</span>Last 30 days<ChevronDown size={14}/></button><button className="primary-btn" onClick={()=>setCreateOpen(true)}><Plus size={16}/> Create task</button></div></div>
+        <div className="page-title-row"><div><div className="eyebrow"><span className="title-live"/>AUTONOMOUS WORKFORCE <span className="eyebrow-divider">/</span> {view.toUpperCase()} <span className="eyebrow-divider">/</span> {persistentMode?'ACCOUNT DATA':'DEMO DATA'}</div><h1>{view==='overview'?'Good morning, Jordan':view==='marketplace'?'Task marketplace':view==='workspace'?'Task workspace':view==='agents'?'Agent directory':'Treasury'}</h1><p className="page-subtitle">{view==='overview'?'Here’s what your agents have been working on.':view==='workspace'?'Track execution, review deliverables, and settle agent work.':view==='marketplace'?'Discover autonomous work and compare agent bids.':view==='agents'?'Your autonomous workforce, ready to take on work.':'Follow every escrow, payout, and refund on NEAR.'}</p></div><div className="title-actions"><button className="secondary-btn date-btn"><span className="date-icon">◷</span>Last 30 days<ChevronDown size={14}/></button><button className="primary-btn" onClick={()=>setCreateOpen(true)}><Plus size={16}/> Create task</button></div></div>
+        {workspaceLoadError&&<div className="workspace-data-error" role="status">Account data is unavailable: {workspaceLoadError}</div>}
         {view==='overview'&&<Overview setView={setView} setCreateOpen={setCreateOpen} approved={approved} openDemoTask={(task)=>{setActiveTask(task);setView('workspace')}} />}
         {view==='workspace'&&<Workspace task={activeTask} approved={Boolean(chainTask?.complete)} onApprove={approve} bids={bids} connected={connected} onConnect={connectWallet} account={account} contractConfigured={contractConfigured} chainTask={chainTask} chainBusy={chainBusy} chainError={chainError} workerAccountId={workerAccountId} setWorkerAccountId={(value)=>{setWorkerAccountId(value);setWorkerVerified(false);setWorkerCheck('')}} workerVerified={workerVerified} workerCheck={workerCheck} verifyWorker={verifyWorker} onChainAction={runEscrowAction} receipts={receipts.filter((r)=>r.taskId===activeTask.id)} />}
         {view==='marketplace'&&<Marketplace bids={bids} createTask={()=>setCreateOpen(true)} openTask={(task)=>{setActiveTask(task);setView('workspace')}} query={query} setQuery={setQuery} />}
         {view==='agents'&&<Directory agents={shownAgents} query={query} setQuery={setQuery} />}
         {view==='treasury'&&<Treasury connected={connected} onConnect={()=>setWalletOpen(true)} receipts={receipts} />}
-        <footer><span>© 2026 AGENTVAULT</span><span>BUILT FOR AGENT ECONOMY <i className="footer-dot"/> NEAR BUILD BEYOND BOUNDARIES</span><span className="footer-version">v0.9.4 <span>·</span> DEMO ENVIRONMENT</span></footer>
+        <footer><span>© 2026 AGENTVAULT</span><span>BUILT FOR AGENT ECONOMY <i className="footer-dot"/> NEAR BUILD BEYOND BOUNDARIES</span><span className="footer-version">v0.9.4 <span>·</span> {persistentMode?'ACCOUNT DATA MODE':'DEMO ENVIRONMENT'}</span></footer>
       </div>
     </section>
     {walletOpen&&<div className="modal-backdrop" onMouseDown={(e)=>e.target===e.currentTarget&&setWalletOpen(false)}><div className="modal wallet-modal"><button className="modal-close" onClick={()=>setWalletOpen(false)} aria-label="Close"><X size={18}/></button><div className="modal-icon"><Wallet size={21}/></div><div className="modal-kicker">CONNECT TO NEAR TESTNET</div><h2>Connect your wallet</h2><p>Choose a NEAR wallet to sign in. AGENTVAULT never asks for your seed phrase or private key.</p><button className="wallet-choice" onClick={connectWallet}><span className="wallet-logo near-logo">N</span><span><b>Connect with NEAR</b><small>Wallets available through NEAR Connect</small></span><ArrowUpRight size={16}/></button><div className="modal-foot"><LockKeyhole size={13}/>Transactions require your explicit wallet signature.</div></div></div>}
-    {createOpen&&<div className="modal-backdrop" onMouseDown={(e)=>e.target===e.currentTarget&&setCreateOpen(false)}><form className="modal create-modal" onSubmit={createTask}><button type="button" className="modal-close" onClick={()=>setCreateOpen(false)} aria-label="Close"><X size={18}/></button><div className="modal-icon"><Plus size={21}/></div><div className="modal-kicker">NEW WORK ORDER</div><h2>Create a task</h2><p>Define the outcome. Agents will bid with their approach, price, and estimated delivery.</p><label>Task title<input value={taskTitle} onChange={e=>setTaskTitle(e.target.value)} placeholder="e.g. Map emerging AI startups in East Africa" required minLength={4}/></label><label>Task brief<textarea value={taskDescription} onChange={e=>setTaskDescription(e.target.value)} placeholder="Describe the deliverable, scope, and what a good result looks like…" required minLength={20}/></label><div className="form-grid"><label>Budget<input type="number" min="0.001" step="0.001" value={taskBudget} onChange={e=>setTaskBudget(e.target.value)} placeholder="0.50" required/><small>NEAR</small></label><label>Deadline<select defaultValue="7"><option value="3">3 days</option><option value="7">7 days</option><option value="14">14 days</option></select></label></div><label>Capabilities <div className="capability-tags"><span>Research <X size={12}/></span><button type="button" onClick={()=>notify('Capability picker is available in the expanded task workflow.')}><Plus size={13}/> Add</button></div></label><button className="primary-btn modal-submit" type="submit"><Sparkles size={16}/> Find agents</button><div className="modal-foot"><ShieldCheck size={13}/>Posting creates a demo task. Funding requires a connected wallet.</div></form></div>}
+    {createOpen&&<div className="modal-backdrop" onMouseDown={(e)=>e.target===e.currentTarget&&setCreateOpen(false)}><form className="modal create-modal" onSubmit={createTask}><button type="button" className="modal-close" onClick={()=>setCreateOpen(false)} aria-label="Close"><X size={18}/></button><div className="modal-icon"><Plus size={21}/></div><div className="modal-kicker">NEW WORK ORDER</div><h2>Create a task</h2><p>{persistentMode?'Save a task to your account. Agent bidding and assignment are not enabled yet.':'Define the outcome for the local demo marketplace.'}</p><label>Task title<input value={taskTitle} onChange={e=>{setTaskTitle(e.target.value);setCreateIdempotencyKey(undefined)}} placeholder="e.g. Map emerging AI startups in East Africa" required minLength={4}/></label><label>Task brief<textarea value={taskDescription} onChange={e=>{setTaskDescription(e.target.value);setCreateIdempotencyKey(undefined)}} placeholder="Describe the deliverable, scope, and what a good result looks like…" required minLength={20}/></label><div className="form-grid"><label>Budget<input type="number" min="0.001" step="0.001" value={taskBudget} onChange={e=>{setTaskBudget(e.target.value);setCreateIdempotencyKey(undefined)}} placeholder="0.50" required/><small>NEAR</small></label><label>Deadline<select value={taskDeadlineDays} onChange={(e)=>{setTaskDeadlineDays(e.target.value);setCreateIdempotencyKey(undefined)}}><option value="3">3 days</option><option value="7">7 days</option><option value="14">14 days</option></select></label></div><label>Capabilities <div className="capability-tags"><span>Research <X size={12}/></span><button type="button" onClick={()=>notify('Capability selection is fixed to Research in this workflow.')}><Plus size={13}/> Add</button></div></label><button className="primary-btn modal-submit" type="submit" disabled={taskSaving}><Sparkles size={16}/>{taskSaving?'Saving…':persistentMode?'Save task':'Add demo task'}</button><div className="modal-foot"><ShieldCheck size={13}/>{persistentMode?'Stored in your account database. NEAR actions still require a connected wallet signature.':'Demo task stays in this browser session. Funding requires a connected wallet.'}</div></form></div>}
     {toast&&<div className="toast"><BadgeCheck size={16}/>{toast}<button onClick={()=>setToast('')} aria-label="Dismiss"><X size={14}/></button></div>}
   </main>;
 }
