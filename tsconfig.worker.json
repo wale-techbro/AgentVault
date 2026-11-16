@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "rootDir": ".",
+    "outDir": "dist-worker",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmitOnError": true,
+    "types": ["node"]
+  },
+  "include": ["worker/**/*.ts", "lib/worker/**/*.ts", "lib/ai/provider.ts"],
+  "exclude": ["lib/**/*.test.ts", "lib/**/*.test.tsx"]
+}

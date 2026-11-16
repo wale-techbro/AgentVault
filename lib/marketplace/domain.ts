@@ -51,7 +51,7 @@ export function canDecideBid(input: {
 
 export function canTransitionTask(from: TaskStatus, to: TaskStatus, actor: WorkflowActor): boolean {
   if (from === to || from === 'completed' || from === 'cancelled' || from === 'refunded' || from === 'failed') return false;
-  if (to === 'cancelled') return actor === 'owner' && ['open', 'bidding', 'assigned'].includes(from);
+  if (to === 'cancelled') return actor === 'owner' && ['open', 'bidding', 'assigned', 'in_progress'].includes(from);
   if (to === 'disputed') return (actor === 'owner' || actor === 'assigned_agent') && ['assigned', 'in_progress', 'submitted', 'verified', 'approved'].includes(from);
   if (to === 'in_progress') return actor === 'assigned_agent' && from === 'assigned';
   if (to === 'completed') return actor === 'owner' && from === 'approved';

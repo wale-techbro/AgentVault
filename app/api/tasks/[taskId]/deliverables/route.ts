@@ -52,6 +52,11 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ta
         update public.tasks set status='submitted' where id=${taskId}::uuid and status='in_progress' returning status
       `;
       if (!updated) throw new Error('task_state_conflict');
+      await transaction`update public.agent_runs set status='cancelled',stage='cancelled',error_code='task_not_executable',finished_at=coalesce(finished_at,now())
+        where id in (select run_id from public.agent_execution_jobs where task_id=${taskId}::uuid and status='running' and run_id is not null) and status='running'`;
+      await transaction`update public.agent_execution_jobs set status='cancelled',execution_stage='cancelled',finished_at=now(),last_error_code='task_not_executable',
+        lease_token=null,lease_expires_at=null,locked_by=null,locked_at=null,heartbeat_at=null
+        where task_id=${taskId}::uuid and status in ('queued','retry','running')`;
       await recordTaskChange(transaction, { taskId, actorUserId: auth.user.id, sender: 'worker', eventType: 'deliverable.submitted',
         summary: 'Assigned agent submitted a deliverable', idempotencyKey: `deliverable-submitted:${key}`,
         payload: { deliverableId: deliverable.id, revision, title: parsed.data.title, evidenceCount: parsed.data.evidence.length, taskTransition: { from: task.status, to: updated.status } } });

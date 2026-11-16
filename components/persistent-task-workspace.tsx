@@ -7,7 +7,9 @@ import { nearExplorerUrl, type EscrowCall, type EscrowView } from '@/lib/near/cl
 
 type ApiBid = { id: string; taskId: string; agentId: string; agent: string; agentAccountId: string; amountNear: number; etaHours: number; capabilityScore: number; proposal: string; status: string; createdAt: string };
 type Deliverable = { id: string; agent_id: string; agent_name: string; revision: number; title: string; content: { title?: string; body?: string }; status: string; metadata: Record<string, unknown>; verification_evidence: { label: string; url: string }[]; review_note: string | null; submittedAt: string; reviewedAt: string | null };
-type Detail = { task: Bid; taskStatus: string; isOwner: boolean; isAssignedAgent: boolean; deliverables: Deliverable[]; events: { sender: string; event_type: string; payload: Record<string, unknown>; created_at: string }[] };
+type ExecutionLog = { event_type: string; level: string; details: Record<string, unknown>; correlation_id: string; created_at: string };
+type Execution = { id: string; status: string; execution_stage: string; attempts: number; max_attempts: number; last_error_code: string | null; available_at: string; run_id: string | null; correlation_id: string | null; run_status: string | null; run_started_at: string | null; run_finished_at: string | null; run_error_code: string | null; deliverable_id: string | null; revision: number | null; logs: ExecutionLog[] };
+type Detail = { task: Bid; taskStatus: string; isOwner: boolean; isAssignedAgent: boolean; deliverables: Deliverable[]; events: { sender: string; event_type: string; payload: Record<string, unknown>; created_at: string }[]; execution: Execution | null; workerHealth: { healthy: boolean; activeWorkers: number; lastHeartbeatAt: string | null } };
 type WorkspaceError = string;
 
 function evidenceFromLines(value: string) {
@@ -73,6 +75,13 @@ export default function PersistentTaskWorkspace({ task: summary, agents, onTaskC
 
   useEffect(() => { if (summary.workerAccountId) setWorkerAccountId(summary.workerAccountId); }, [summary.workerAccountId, setWorkerAccountId]);
 
+  const executionStatus = detail?.execution?.status;
+  useEffect(() => {
+    if (!executionStatus || !['queued', 'running', 'retry'].includes(executionStatus)) return;
+    const timer = window.setInterval(() => { void reload().catch(() => { /* Keep the last known execution state during transient network errors. */ }); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [executionStatus, reload]);
+
   async function mutate(keyName: string, url: string, body: unknown, method = 'POST', message = 'Saved.') {
     const key = keys.current[keyName] || (keys.current[keyName] = crypto.randomUUID());
     setBusy(keyName); setError(''); setSuccess('');
@@ -92,10 +101,21 @@ export default function PersistentTaskWorkspace({ task: summary, agents, onTaskC
   const { taskStatus, task, isOwner, isAssignedAgent } = detail;
   const open = taskStatus === 'open' || taskStatus === 'bidding';
   const canReview = isOwner && latestDeliverable && ['submitted', 'verified'].includes(latestDeliverable.status);
+  const execution = detail.execution;
+  const executionLabel = execution?.status === 'queued' ? 'Queued'
+    : execution?.status === 'running' && execution.execution_stage === 'planning' ? 'Planning'
+    : execution?.status === 'running' ? 'Running'
+    : execution?.status === 'retry' ? 'Failed · retrying'
+    : execution?.status === 'failed' ? 'Failed'
+    : execution?.status === 'cancelled' ? 'Cancelled'
+    : execution?.status === 'succeeded' && taskStatus === 'submitted' ? 'Awaiting owner review'
+    : execution?.status === 'succeeded' ? 'Deliverable submitted'
+    : '';
 
   return <section className="workspace-view">
     <div className="workspace-banner"><div className="task-type type-research"><BriefcaseBusiness size={19}/></div><div className="workspace-title"><div className="task-breadcrumb">ACCOUNT TASK <span>·</span> {task.id.slice(0, 8).toUpperCase()}</div><h2>{task.title}</h2><p>{task.description}</p></div><span className={`status ${taskStatus === 'completed' ? 'status-complete' : taskStatus === 'in_progress' ? 'status-progress' : 'status-review'}`}><i/>{taskStatus.replace('_', ' ')}</span></div>
     {error && <div className="workspace-data-error" role="alert">{error}</div>}{success && <div className="workspace-success-note" role="status"><Check size={14}/>{success}</div>}
+    {execution && <section className="panel execution-status-panel" aria-live="polite"><div className="execution-status-heading"><div><span className="nav-label">BACKGROUND EXECUTION</span><h3>{executionLabel}</h3></div><span className={`execution-state-badge execution-${execution.status}`}><i/>{execution.status.replace('_', ' ')}</span></div><p>{execution.status === 'queued' ? 'A separate worker will pick up this assigned task.' : execution.status === 'running' ? `Worker stage: ${execution.execution_stage}.` : execution.status === 'retry' ? `The previous attempt failed safely. Retry scheduled for ${new Date(execution.available_at).toLocaleString()}.` : execution.status === 'failed' ? 'Worker execution stopped after the retry limit or an unsupported request. No deliverable or payout was created by the failed run.' : execution.status === 'succeeded' ? 'The worker submitted a deliverable. Owner verification and approval are still required; payment is never released automatically.' : 'The queued execution was stopped because the task is no longer executable.'}</p><div className="execution-status-meta"><span>Attempt <b>{execution.attempts}/{execution.max_attempts}</b></span>{execution.last_error_code && <span>Failure code <b>{execution.last_error_code}</b></span>}{execution.correlation_id && <span>Correlation <code>{execution.correlation_id}</code></span>}<span className={detail.workerHealth.healthy ? 'worker-health-live' : ''}>Worker {detail.workerHealth.healthy ? 'online' : 'not connected'}</span>{detail.workerHealth.lastHeartbeatAt && <span>Heartbeat {new Date(detail.workerHealth.lastHeartbeatAt).toLocaleTimeString()}</span>}</div>{execution.logs.length > 0 && <div className="execution-log-list">{execution.logs.slice(0, 5).map((log, index) => <span key={`${log.event_type}-${index}`}>{log.event_type.replace(/[._]/g, ' ')} · {new Date(log.created_at).toLocaleTimeString()}</span>)}</div>}</section>}
     <div className="workspace-meta"><div><span>BUDGET</span><b>{task.amount.toFixed(3)} <small>NEAR</small></b></div><div><span>DEADLINE</span><b>{task.deadlineAt ? new Date(task.deadlineAt).toLocaleDateString() : 'Not set'}</b></div><div><span>REQUIRED SKILLS</span><div className="skill-chips">{task.category.split(',').map((skill) => <i key={skill}>{skill.trim()}</i>)}</div></div><div><span>ACTIVITY</span><b>{detail.events.length} recorded events</b></div></div>
     <div className="workspace-columns"><div className="workspace-primary">
       {open && !isOwner && myAgents.length > 0 && <form className="panel workflow-panel persistent-form" onSubmit={async (event) => { event.preventDefault(); const ok = await mutate('bid', `/api/tasks/${task.id}/bids`, { agentId: bidAgentId, amountNear: bidAmount, etaHours: Number(bidEta), proposal: bidProposal }, 'POST', 'Bid submitted to the task owner.'); if (ok) { setBidProposal(''); keys.current.bid = ''; } }}>
@@ -126,7 +146,7 @@ export default function PersistentTaskWorkspace({ task: summary, agents, onTaskC
       <div className="panel workflow-panel"><div className="panel-head"><div><h3>Task activity</h3><p>Persisted events and state transitions</p></div></div>{detail.events.length === 0 ? <p>No participant activity has been recorded yet.</p> : <div className="persistent-events">{detail.events.map((event, index) => <div className="activity-line" key={`${event.event_type}-${index}`}><span className="avatar avatar-green"><Activity size={13}/></span><p><b>{event.event_type.replace(/[._]/g, ' ')}</b><small>{event.sender} · {new Date(event.created_at).toLocaleString()}</small></p></div>)}</div>}</div>
     </div>
     <aside className="workspace-secondary"><div className="panel selected-card"><div className="panel-head"><div><h3>Work order</h3><p>{isOwner ? 'You own this task' : isAssignedAgent ? 'Assigned to your agent' : 'Open marketplace task'}</p></div></div><div className="selected-stats"><div><span>BUDGET</span><b>{task.amount.toFixed(3)} <small>NEAR</small></b></div><div><span>STATUS</span><b>{taskStatus.replace('_', ' ')}</b></div><div><span>BIDS</span><b>{task.bidCount || bids.length}</b></div></div><div className="agent-skills"><span>CAPABILITIES</span><div>{task.category.split(',').map((skill) => <i key={skill}>{skill.trim()}</i>)}</div></div>
-      {isOwner && ['open', 'bidding', 'assigned'].includes(taskStatus) && <button className="secondary-btn full-btn" disabled={busy === 'cancel'} onClick={() => void mutate('cancel', `/api/tasks/${task.id}/transition`, { to: 'cancelled' }, 'POST', 'Task cancelled.')}>Cancel task</button>}
+      {isOwner && ['open', 'bidding', 'assigned', 'in_progress'].includes(taskStatus) && <button className="secondary-btn full-btn" disabled={busy === 'cancel'} onClick={() => void mutate('cancel', `/api/tasks/${task.id}/transition`, { to: 'cancelled' }, 'POST', 'Task cancelled; queued or running worker execution was stopped.')}>Cancel task</button>}
       {(isOwner || isAssignedAgent) && ['assigned', 'in_progress', 'submitted', 'verified', 'approved'].includes(taskStatus) && <button className="secondary-btn full-btn" disabled={busy === 'dispute'} onClick={() => { const note = window.prompt('Describe the issue (at least 10 characters).'); if (note) void mutate('dispute', `/api/tasks/${task.id}/transition`, { to: 'disputed', note }, 'POST', 'Dispute recorded.'); }}>Open dispute</button>}
       {isOwner && taskStatus === 'approved' && <button className="primary-btn full-btn" disabled={busy === 'complete'} onClick={() => void mutate('complete', `/api/tasks/${task.id}/transition`, { to: 'completed' }, 'POST', 'Task marked completed.')}>Mark task completed</button>}
     </div>

@@ -53,8 +53,12 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ta
         returning status
       `;
       if (!updated) throw new Error('transition_conflict');
-      if (parsed.data.to === 'cancelled') {
-        await transaction`update public.agent_execution_jobs set status='cancelled',finished_at=now() where task_id=${taskId}::uuid and status in ('queued','retry')`;
+      if (parsed.data.to === 'cancelled' || parsed.data.to === 'disputed') {
+        await transaction`update public.agent_runs set status='cancelled',stage='cancelled',error_code='task_not_executable',finished_at=coalesce(finished_at,now())
+          where id in (select run_id from public.agent_execution_jobs where task_id=${taskId}::uuid and status='running' and run_id is not null) and status='running'`;
+        await transaction`update public.agent_execution_jobs set status='cancelled',execution_stage='cancelled',finished_at=now(),last_error_code='task_not_executable',
+          lease_token=null,lease_expires_at=null,locked_by=null,locked_at=null,heartbeat_at=null
+          where task_id=${taskId}::uuid and status in ('queued','retry','running')`;
         await transaction`update public.bids set status='rejected' where task_id=${taskId}::uuid and status='pending'`;
       }
       if (task.selected_agent_id && (parsed.data.to === 'completed' || parsed.data.to === 'cancelled')) {
